@@ -1,0 +1,11 @@
+app/.git
+app/.env
+app/laravel-echo-server.json
+app/node_modules
+app/vendor
+app/storage
+.env
+credentials.txt
+announce/.env
+announce/.git
+announce/target

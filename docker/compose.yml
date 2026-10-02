@@ -1,0 +1,140 @@
+name: unit3d
+x-app: &app
+  image: unit3d-app:local
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+    target: app
+    args:
+      APP_URL: https://${DOMAIN:?Set DOMAIN}
+  env_file: app/.env
+  volumes:
+    - ./app/.env:/var/www/html/.env:ro
+    - storage:/var/www/html/storage
+  depends_on:
+    mysql:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    meilisearch:
+      condition: service_healthy
+services:
+  proxy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [web]
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: web
+      args:
+        APP_URL: https://${DOMAIN:?Set DOMAIN}
+    restart: unless-stopped
+    volumes:
+      - storage:/var/www/html/storage:ro
+    depends_on: [app, echo]
+  app:
+    <<: *app
+    restart: unless-stopped
+  queue:
+    <<: *app
+    command: ["php", "artisan", "queue:work", "--sleep=3", "--tries=3", "--timeout=90", "--max-time=3600"]
+    restart: unless-stopped
+    stop_grace_period: 120s
+  scheduler:
+    <<: *app
+    command: ["php", "artisan", "schedule:work"]
+    restart: unless-stopped
+  init:
+    <<: *app
+    profiles: [tools]
+    command: ["unit3d-initialize"]
+    environment:
+      TRACKER_ENABLED: 'false'
+  echo:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: echo
+      args:
+        APP_URL: https://${DOMAIN:?Set DOMAIN}
+    restart: unless-stopped
+    volumes:
+      - ./app/laravel-echo-server.json:/var/www/html/laravel-echo-server.json:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+  announce:
+    profiles: [announce]
+    build:
+      context: .
+      dockerfile: docker/announce.Dockerfile
+    restart: unless-stopped
+    stop_grace_period: 120s
+    volumes:
+      - ./announce/.env:/opt/unit3d-announce/.env:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6969/announce/health/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: unit3d
+      MYSQL_USER: unit3d
+      MYSQL_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", 'MYSQL_PWD="$$MYSQL_PASSWORD" mysql -h 127.0.0.1 -u unit3d -D unit3d -e "SELECT 1" >/dev/null']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+      - ./docker/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+  meilisearch:
+    image: getmeili/meilisearch:v1.15.2
+    restart: unless-stopped
+    environment:
+      MEILI_ENV: production
+      MEILI_NO_ANALYTICS: 'true'
+      MEILI_MASTER_KEY: ${MEILISEARCH_KEY:?Set MEILISEARCH_KEY}
+    volumes:
+      - search_data:/meili_data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:7700/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+volumes:
+  mysql_data:
+  redis_data:
+  search_data:
+  storage:
+  caddy_data:
+  caddy_config:

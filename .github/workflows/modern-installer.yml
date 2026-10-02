@@ -1,0 +1,121 @@
+name: Modern installer checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scripts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tests/test_modern_installer.py
+      - run: shellcheck -x install.sh ubuntu.sh scripts/*.sh docker/*.sh
+      - run: |
+          for script in install.sh ubuntu.sh scripts/*.sh; do bash -n "$script"; done
+          for script in docker/*.sh; do sh -n "$script"; done
+  docker-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        announce: ['false', 'true']
+    env:
+      INSTALL_ANNOUNCE: ${{ matrix.announce }}
+    needs: scripts
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare isolated test deployment
+        env:
+          DOMAIN: tracker.example.test
+          OWNER_NAME: TestOwner
+          OWNER_EMAIL: test@example.test
+          OWNER_PASSWORD: ci-owner-password-only-for-disposable-tests
+          DB_PASSWORD: ci-db-password-only-for-disposable-tests
+          DB_ROOT_PASSWORD: ci-root-password-only-for-disposable-tests
+          REDIS_PASSWORD: ci-redis-password-only-for-disposable-tests
+          MEILISEARCH_KEY: ci-meili-key-only-for-disposable-tests
+          TRACKER_KEY: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+          APP_KEY: base64:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+        run: |
+          source scripts/common.sh
+          mkdir ci-stack
+          cp -r docker ci-stack/docker
+          cp docker/.dockerignore ci-stack/.dockerignore
+          cp docker/compose.yml ci-stack/compose.yml
+          checkout_app "$PWD/ci-stack/app"
+          if [[ $INSTALL_ANNOUNCE == true ]]; then
+            checkout_announce "$PWD/ci-stack/announce"
+            python3 scripts/announce-configure.py "$PWD/ci-stack/announce" docker
+            sudo chown 10001:10001 ci-stack/announce/.env
+          fi
+          python3 scripts/configure.py "$PWD/ci-stack/app" docker
+          sudo chown 0:33 ci-stack/app/.env
+          sudo chown 1000:1000 ci-stack/app/laravel-echo-server.json
+          printf 'DOMAIN=%s\nDB_PASSWORD=%s\nDB_ROOT_PASSWORD=%s\nREDIS_PASSWORD=%s\nMEILISEARCH_KEY=%s\n' "$DOMAIN" "$DB_PASSWORD" "$DB_ROOT_PASSWORD" "$REDIS_PASSWORD" "$MEILISEARCH_KEY" > ci-stack/.env
+          if [[ $INSTALL_ANNOUNCE == true ]]; then printf 'COMPOSE_PROFILES=announce\n' >> ci-stack/.env; fi
+          printf 'bind 0.0.0.0\nprotected-mode yes\nappendonly yes\nrequirepass %s\n' "$REDIS_PASSWORD" > ci-stack/docker/redis.conf
+          printf 'http://localhost {\n    reverse_proxy web:80\n}\n' > ci-stack/docker/Caddyfile
+          if [[ $INSTALL_ANNOUNCE == true ]]; then
+            python3 scripts/announce-proxy.py ci-stack/docker/Caddyfile
+            sed -i 's/tracker.example.test/http:\/\/localhost/' ci-stack/docker/Caddyfile
+          fi
+          cat > ci-stack/compose.ci.yml <<'YAML'
+          services:
+            web:
+              ports: ["127.0.0.1:8080:80"]
+            proxy:
+              ports: !override ["127.0.0.1:8081:80"]
+          YAML
+      - name: Build and initialize
+        working-directory: ci-stack
+        run: |
+          docker compose config --quiet
+          docker compose build
+          docker compose run --rm --no-deps proxy caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile > /dev/null
+          docker compose up -d --wait mysql redis meilisearch
+          docker compose run --rm init
+          if docker compose run --rm init; then
+            echo 'Second initialization unexpectedly succeeded' >&2
+            exit 1
+          fi
+          if [[ $INSTALL_ANNOUNCE == true ]]; then docker compose up -d --wait announce; fi
+          docker compose -f compose.yml -f compose.ci.yml up -d proxy queue scheduler
+      - name: Smoke test application and persistence
+        working-directory: ci-stack
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/login -o /tmp/unit3d-login.html; then break; fi
+            if [ "$attempt" = 60 ]; then exit 1; fi
+            sleep 2
+          done
+          grep -qi '<html' /tmp/unit3d-login.html
+          docker compose exec -T app php artisan migrate:status
+          docker compose exec -T app php artisan queue:monitor redis:default
+          curl -fsS 'http://127.0.0.1:8080/socket.io/?EIO=3&transport=polling' | grep -q 'sid'
+          before=$(docker compose exec -T app printenv APP_KEY)
+          docker compose restart app queue scheduler
+          after=$(docker compose exec -T app printenv APP_KEY)
+          test "$before" = "$after"
+          docker compose exec -T app test -f storage/.installed
+          docker compose exec -T app php artisan migrate:status
+      - name: Rust tracker proxy and management isolation
+        if: matrix.announce == 'true'
+        working-directory: ci-stack
+        run: |
+          docker compose exec -T announce curl -fsS http://127.0.0.1:6969/announce/health/ping | grep -q PONG
+          curl -fsS -A 'qBittorrent/5.0.0' http://127.0.0.1:8081/announce/00000000000000000000000000000000 | grep -q 'failure reason'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/announce/health/ping)" = 404
+          api_key=$(docker compose exec -T app printenv TRACKER_KEY)
+          test "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8081/announce/$api_key/stats")" = 404
+          docker compose restart announce
+          docker compose up -d --wait announce
+      - name: Service logs
+        if: failure()
+        working-directory: ci-stack
+        run: docker compose logs --tail=150
+      - name: Remove disposable CI volumes
+        if: always()
+        working-directory: ci-stack
+        run: docker compose -f compose.yml -f compose.ci.yml down -v
