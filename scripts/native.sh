@@ -61,7 +61,8 @@ chmod 640 /etc/redis/redis.conf
 chown redis:redis /etc/redis/redis.conf
 systemctl restart redis-server
 useradd --system --home /var/lib/meilisearch --shell /usr/sbin/nologin meilisearch
-install -d -o meilisearch -g meilisearch /var/lib/meilisearch
+install -d -o meilisearch -g meilisearch -m 750 \
+  /var/lib/meilisearch /var/lib/meilisearch/dumps /var/lib/meilisearch/snapshots
 curl -fL "https://github.com/meilisearch/meilisearch/releases/download/v$MEILI_VERSION/meilisearch-linux-amd64" -o /usr/local/bin/meilisearch
 chmod 755 /usr/local/bin/meilisearch
 printf 'MEILI_ENV=production\nMEILI_HTTP_ADDR=127.0.0.1:7700\nMEILI_DB_PATH=/var/lib/meilisearch/data.ms\nMEILI_MASTER_KEY=%s\nMEILI_NO_ANALYTICS=true\n' "$MEILISEARCH_KEY" > /etc/unit3d/meilisearch.env
@@ -72,9 +73,13 @@ After=network.target
 [Service]
 User=meilisearch
 Group=meilisearch
+WorkingDirectory=/var/lib/meilisearch
 EnvironmentFile=/etc/unit3d/meilisearch.env
+Environment=MEILI_DUMP_DIR=/var/lib/meilisearch/dumps
+Environment=MEILI_SNAPSHOT_DIR=/var/lib/meilisearch/snapshots
 ExecStart=/usr/local/bin/meilisearch
 Restart=on-failure
+RestartSec=5
 NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
@@ -103,6 +108,8 @@ if [[ $INSTALL_ANNOUNCE == true ]]; then
   install_native_announce
   ANNOUNCE_NGINX="include /etc/nginx/snippets/unit3d-announce.conf;"
 fi
+# Explicitly enter the application directory before finalization.
+cd "$APP" || exit 1
 runuser -u www-data -- php${PHP_VERSION} artisan storage:link
 runuser -u www-data -- php${PHP_VERSION} artisan scout:sync-index-settings
 runuser -u www-data -- php${PHP_VERSION} artisan scout:import 'App\Models\Torrent'
@@ -195,3 +202,5 @@ supervisorctl update
 printf 'URL: https://%s\nOwner: %s\nOwner password: %s\n' "$DOMAIN" "$OWNER_NAME" "$OWNER_PASSWORD" > /etc/unit3d/credentials.txt
 chmod 600 /etc/unit3d/credentials.txt
 printf 'Installed: https://%s\nCredentials: /etc/unit3d/credentials.txt\nConfigure SMTP and API keys in %s/.env, then rebuild config cache.\n' "$DOMAIN" "$APP"
+
+printf 'After editing .env: cd %s && sudo -u www-data php%s artisan config:cache\nThen: sudo supervisorctl restart "unit3d-queue:*" unit3d-echo\n' "$APP" "$PHP_VERSION"

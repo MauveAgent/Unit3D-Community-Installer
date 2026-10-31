@@ -8,6 +8,8 @@ install_native_announce() {
   python3 "$ROOT/scripts/announce-configure.py" "$source" native
   install -d -o unit3d-announce -g unit3d-announce /opt/unit3d-rust
   chown -R unit3d-announce:unit3d-announce "$source"
+  chmod 750 "$source"
+  chmod 640 "$source/.env"
   curl -fsSL https://sh.rustup.rs -o /opt/unit3d-rust/install-rust.sh
   chmod 755 /opt/unit3d-rust/install-rust.sh
   runuser -u unit3d-announce -- env CARGO_HOME=/opt/unit3d-rust/cargo RUSTUP_HOME=/opt/unit3d-rust/rustup \
@@ -20,6 +22,7 @@ install_native_announce() {
   )
   install -m 755 "$source/target/release/unit3d-announce" /usr/local/bin/unit3d-announce
   chown -R root:unit3d-announce "$source"
+  chmod 750 "$source"
   chmod 640 "$source/.env"
   cat > /etc/systemd/system/unit3d-announce.service <<'EOF'
 [Unit]
@@ -32,6 +35,7 @@ Group=unit3d-announce
 WorkingDirectory=/opt/unit3d-announce
 ExecStart=/usr/local/bin/unit3d-announce
 Restart=on-failure
+RestartSec=5
 TimeoutStopSec=120
 NoNewPrivileges=true
 PrivateTmp=true

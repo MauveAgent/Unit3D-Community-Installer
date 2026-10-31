@@ -182,3 +182,12 @@ shellcheck -x install.sh ubuntu.sh scripts/*.sh docker/*.sh
 ```
 
 The included GitHub Actions workflow checks configuration generation and scripts, then builds and smoke-tests the Docker stack against an empty MySQL database. Native provisioning needs fresh VPS/VM testing on each host target; it cannot be safely verified by running installation on a shared development machine.
+
+## Included installation fixes
+
+- Meilisearch has a writable working directory and explicit dump/snapshot paths.
+- The Rust tracker directory is explicitly mode 750 and its configuration is mode 640, readable by its service group even under a restrictive umask.
+- Application finalization explicitly changes into `/var/www/unit3d` before running Artisan.
+- Completion output includes the PHP-version-specific config-cache and worker restart commands after editing SMTP/API settings.
+
+These fixes are integrated into fresh installation. Do not run this installer over an existing or partially completed installation. The one-time recovery scripts from troubleshooting are intentionally excluded: they depended on that server's exact state and are not a general resume mechanism.
